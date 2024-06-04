@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 #define PORT 8889
 #define BUFFER_SIZE 1024
@@ -180,38 +181,7 @@ void *client_thread(void *arg) {
             printf("Debe abrir una conexión primero usando el comando 'open <dirección-ip>'\n");
         } else {
             // Enviar el comando completo al servidor
-            snprintf(buffer, BUFFER_SIZE, "%s %s", cmd, arg ? arg : "");
-            send(client_socket, buffer, strlen(buffer), 0);
-
-            // Manejar comandos específicos
-            if (strcmp(cmd, "get") == 0) {
-                char file_path[BUFFER_SIZE];
-                snprintf(file_path, BUFFER_SIZE, "%s/%s", client_current_dir, arg);
-                FILE *file = fopen(file_path, "wb");
-                if (file == NULL) {
-                    perror("Error al crear el archivo local");
-                    continue;
-                }
-
-                // Recibir el archivo del servidor
-                int bytes_received;
-                while ((bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
-                    fwrite(buffer, 1, bytes_received, file);
-                    if (bytes_received < BUFFER_SIZE) {
-                        break;
-                    }
-                }
-
-                fclose(file);
-                printf("Archivo %s recibido\n", arg);
-
-            // Recibir la confirmación del servidor
-                bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
-                if (bytes_received > 0) {
-                    buffer[bytes_received] = '\0';
-                    printf("%s\n", buffer);
-                }
-            } else if (strcmp(cmd, "put") == 0) {
+            if (strcmp(cmd, "put") == 0) {
                 char file_path[BUFFER_SIZE];
                 snprintf(file_path, BUFFER_SIZE, "%s/%s", client_current_dir, arg);
                 FILE *file = fopen(file_path, "rb");
@@ -220,29 +190,59 @@ void *client_thread(void *arg) {
                     continue;
                 }
 
-            // Enviar el archivo al servidor
-            int bytes_read;
-            while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
-                send(client_socket, buffer, bytes_read, 0);
-            }
+                // Leer el contenido del archivo
+                fseek(file, 0, SEEK_END);
+                long file_size = ftell(file);
+                fseek(file, 0, SEEK_SET);
+                char *file_content = malloc(file_size);
+                fread(file_content, 1, file_size, file);
+                fclose(file);
 
-            fclose(file);
-            printf("Archivo %s enviado\n", arg);
+                // Enviar el comando y el contenido del archivo al servidor
+                snprintf(buffer, BUFFER_SIZE, "put %s %s", arg, file_content);
+                send(client_socket, buffer, strlen(buffer), 0);
+                free(file_content);
 
-            // Recibir la confirmación del servidor
-            int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
-            if (bytes_received > 0) {
-                buffer[bytes_received] = '\0';
-                printf("%s\n", buffer);
+                // Recibir la respuesta del servidor
+                int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
+                if (bytes_received > 0) {
+                    buffer[bytes_received] = '\0';
+                    printf("%s\n", buffer);
+                }
+            } else if (strcmp(cmd, "get") == 0) {
+                snprintf(buffer, BUFFER_SIZE, "get %s", arg);
+                send(client_socket, buffer, strlen(buffer), 0);
+
+                // Recibir el contenido del archivo del servidor
+                int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
+                if (bytes_received > 0) {
+                    buffer[bytes_received] = '\0';
+                    printf("Recibiendo archivo %s\n", arg);
+
+                    // Guardar el contenido del archivo en el directorio actual del cliente
+                    char file_path[BUFFER_SIZE];
+                    snprintf(file_path, BUFFER_SIZE, "%s/%s", client_current_dir, arg);
+                    FILE *file = fopen(file_path, "wb");
+                    if (file == NULL) {
+                        perror("Error al crear el archivo local");
+                        continue;
+                    }
+                    fwrite(buffer, 1, bytes_received, file);
+                    fclose(file);
+
+                    printf("Archivo %s recibido\n", arg);
+                }
+            } else {
+                snprintf(buffer, BUFFER_SIZE, "%s %s", cmd, arg ? arg : "");
+                send(client_socket, buffer, strlen(buffer), 0);
+
+                // Recibir la respuesta del servidor
+                int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
+                if (bytes_received > 0) {
+                    buffer[bytes_received] = '\0';
+                    printf("%s\n", buffer);
+                }
             }
-        } else {
-            // Recibir la respuesta del servidor
-            int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
-            if (bytes_received > 0) {
-                buffer[bytes_received] = '\0';
-                printf("%s\n", buffer);
-            }
-        }
         }
     }
 
@@ -269,8 +269,12 @@ void *handle_client(void *client_socket) {
 
         // Parsear el comando
         char *cmd = strtok(buffer, " ");
-        char *arg = strtok(NULL, "");
+        char *arg = strtok(NULL, " ");
+        char *file_content = strtok(NULL, "");
         char response[BUFFER_SIZE];
+
+        // clean the buffer
+        memset(response, 0, BUFFER_SIZE);
 
         if (strcmp(cmd, "cd") == 0) {
             if (arg == NULL) {
@@ -305,42 +309,44 @@ void *handle_client(void *client_socket) {
         } else if (strcmp(cmd, "get") == 0) {
             if (arg == NULL) {
                 snprintf(response, BUFFER_SIZE, "550 No file specified\n");
+                send(socket, response, strlen(response), 0);
             } else {
                 char file_path[BUFFER_SIZE];
                 snprintf(file_path, BUFFER_SIZE, "%s/%s", server_current_dir, arg);
                 FILE *file = fopen(file_path, "rb");
                 if (file == NULL) {
                     snprintf(response, BUFFER_SIZE, "550 File not found\n");
+                    send(socket, response, strlen(response), 0);
                 } else {
+                    // Leer el contenido del archivo
                     fseek(file, 0, SEEK_END);
                     long file_size = ftell(file);
                     fseek(file, 0, SEEK_SET);
-                    snprintf(response, BUFFER_SIZE, "150 Opening binary mode data connection for %s (%ld bytes)\n", arg, file_size);
-                    send(socket, response, strlen(response), 0);
-                    while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
-                        send(socket, buffer, bytes_read, 0);
-                    }
+                    char *file_content = malloc(file_size);
+                    fread(file_content, 1, file_size, file);
                     fclose(file);
-                    snprintf(response, BUFFER_SIZE, "226 Transfer complete\n");
+
+                    // Enviar el contenido del archivo al cliente
+                    send(socket, file_content, file_size, 0);
+                    free(file_content);
                 }
             }
         } else if (strcmp(cmd, "put") == 0) {
-            if (arg == NULL) {
-                snprintf(response, BUFFER_SIZE, "550 No file specified\n");
+            if (arg == NULL || file_content == NULL) {
+                snprintf(response, BUFFER_SIZE, "550 No file specified or content missing\n");
+                send(socket, response, strlen(response), 0);
             } else {
                 char file_path[BUFFER_SIZE];
                 snprintf(file_path, BUFFER_SIZE, "%s/%s", server_current_dir, arg);
                 FILE *file = fopen(file_path, "wb");
                 if (file == NULL) {
                     snprintf(response, BUFFER_SIZE, "550 Failed to create file\n");
-                } else {
-                    snprintf(response, BUFFER_SIZE, "150 Opening binary mode data connection for %s\n", arg);
                     send(socket, response, strlen(response), 0);
-                    while ((bytes_read = recv(socket, buffer, BUFFER_SIZE, 0)) > 0) {
-                        fwrite(buffer, 1, bytes_read, file);
-                    }
+                } else {
+                    fwrite(file_content, 1, strlen(file_content), file);
                     fclose(file);
                     snprintf(response, BUFFER_SIZE, "226 Transfer complete\n");
+                    send(socket, response, strlen(response), 0);
                 }
             }
         } else {
