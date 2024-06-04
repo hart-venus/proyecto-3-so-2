@@ -5,7 +5,6 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <dirent.h>
-#include <sys/stat.h>
 
 #define PORT 8889
 #define BUFFER_SIZE 1024
@@ -106,7 +105,7 @@ void *client_thread(void *arg) {
 
         // Parsear el comando
         char *cmd = strtok(command, " ");
-        char *arg = strtok(NULL, " ");
+        char *arg = strtok(NULL, "");
 
         if (strcmp(cmd, "open") == 0) {
             if (arg == NULL) {
@@ -157,8 +156,9 @@ void *client_thread(void *arg) {
         } else if (client_socket == -1) {
             printf("Debe abrir una conexión primero usando el comando 'open <dirección-ip>'\n");
         } else {
-            // Enviar el comando al servidor
-            send(client_socket, command, strlen(command), 0);
+            // Enviar el comando completo al servidor
+            snprintf(buffer, BUFFER_SIZE, "%s %s", cmd, arg ? arg : "");
+            send(client_socket, buffer, strlen(buffer), 0);
 
             // Recibir la respuesta del servidor
             int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
@@ -184,7 +184,7 @@ void *handle_client(void *client_socket) {
 
         // Parsear el comando
         char *cmd = strtok(buffer, " ");
-        char *arg = strtok(NULL, " ");
+        char *arg = strtok(NULL, "");
         char response[BUFFER_SIZE];
 
         if (strcmp(cmd, "cd") == 0) {
