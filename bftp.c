@@ -13,8 +13,16 @@ void *handle_client(void *client_socket);
 void *server_thread(void *arg);
 void *client_thread(void *arg);
 
+char client_current_dir[BUFFER_SIZE];
+
 int main() {
     pthread_t server_tid, client_tid;
+
+    // Obtener el directorio actual del cliente
+    if (getcwd(client_current_dir, sizeof(client_current_dir)) == NULL) {
+        perror("Error al obtener el directorio actual del cliente");
+        exit(EXIT_FAILURE);
+    }
 
     // Crear un hilo para el servidor
     if (pthread_create(&server_tid, NULL, server_thread, NULL) != 0) {
@@ -153,6 +161,21 @@ void *client_thread(void *arg) {
             }
             printf("Saliendo...\n");
             exit(0);
+        } else if (strcmp(cmd, "lcd") == 0) {
+            if (arg == NULL) {
+                printf("Uso: lcd <directorio>\n");
+                continue;
+            }
+
+            if (chdir(arg) == 0) {
+                printf("Directorio actual del cliente cambiado a %s\n", arg);
+                // Actualizar el directorio actual del cliente
+                if (getcwd(client_current_dir, sizeof(client_current_dir)) == NULL) {
+                    perror("Error al obtener el directorio actual del cliente");
+                }
+            } else {
+                perror("Error al cambiar el directorio actual del cliente");
+            }
         } else if (client_socket == -1) {
             printf("Debe abrir una conexión primero usando el comando 'open <dirección-ip>'\n");
         } else {
@@ -160,12 +183,66 @@ void *client_thread(void *arg) {
             snprintf(buffer, BUFFER_SIZE, "%s %s", cmd, arg ? arg : "");
             send(client_socket, buffer, strlen(buffer), 0);
 
+            // Manejar comandos específicos
+            if (strcmp(cmd, "get") == 0) {
+                char file_path[BUFFER_SIZE];
+                snprintf(file_path, BUFFER_SIZE, "%s/%s", client_current_dir, arg);
+                FILE *file = fopen(file_path, "wb");
+                if (file == NULL) {
+                    perror("Error al crear el archivo local");
+                    continue;
+                }
+
+                // Recibir el archivo del servidor
+                int bytes_received;
+                while ((bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
+                    fwrite(buffer, 1, bytes_received, file);
+                    if (bytes_received < BUFFER_SIZE) {
+                        break;
+                    }
+                }
+
+                fclose(file);
+                printf("Archivo %s recibido\n", arg);
+
+            // Recibir la confirmación del servidor
+                bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
+                if (bytes_received > 0) {
+                    buffer[bytes_received] = '\0';
+                    printf("%s\n", buffer);
+                }
+            } else if (strcmp(cmd, "put") == 0) {
+                char file_path[BUFFER_SIZE];
+                snprintf(file_path, BUFFER_SIZE, "%s/%s", client_current_dir, arg);
+                FILE *file = fopen(file_path, "rb");
+                if (file == NULL) {
+                    perror("Error al abrir el archivo local");
+                    continue;
+                }
+
+            // Enviar el archivo al servidor
+            int bytes_read;
+            while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
+                send(client_socket, buffer, bytes_read, 0);
+            }
+
+            fclose(file);
+            printf("Archivo %s enviado\n", arg);
+
+            // Recibir la confirmación del servidor
+            int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
+            if (bytes_received > 0) {
+                buffer[bytes_received] = '\0';
+                printf("%s\n", buffer);
+            }
+        } else {
             // Recibir la respuesta del servidor
             int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
             if (bytes_received > 0) {
                 buffer[bytes_received] = '\0';
                 printf("%s\n", buffer);
             }
+        }
         }
     }
 
@@ -176,6 +253,14 @@ void *handle_client(void *client_socket) {
     int socket = *(int *)client_socket;
     char buffer[BUFFER_SIZE];
     int bytes_read;
+    char server_current_dir[BUFFER_SIZE];
+
+    // Obtener el directorio actual del servidor para este hilo
+    if (getcwd(server_current_dir, sizeof(server_current_dir)) == NULL) {
+        perror("Error al obtener el directorio actual del servidor");
+        close(socket);
+        return NULL;
+    }
 
     // Bucle para recibir y procesar comandos del cliente
     while ((bytes_read = recv(socket, buffer, BUFFER_SIZE, 0)) > 0) {
@@ -190,15 +275,21 @@ void *handle_client(void *client_socket) {
         if (strcmp(cmd, "cd") == 0) {
             if (arg == NULL) {
                 snprintf(response, BUFFER_SIZE, "550 No directory specified\n");
-            } else if (chdir(arg) == 0) {
-                snprintf(response, BUFFER_SIZE, "250 Directory changed to %s\n", arg);
             } else {
-                snprintf(response, BUFFER_SIZE, "550 Failed to change directory\n");
+                char new_dir[BUFFER_SIZE];
+                snprintf(new_dir, BUFFER_SIZE, "%s/%s", server_current_dir, arg);
+                if (chdir(new_dir) == 0) {
+                    snprintf(response, BUFFER_SIZE, "250 Directory changed to %s\n", arg);
+                    // Actualizar el directorio actual del servidor para este hilo
+                    strcpy(server_current_dir, new_dir);
+                } else {
+                    snprintf(response, BUFFER_SIZE, "550 Failed to change directory\n");
+                }
             }
         } else if (strcmp(cmd, "ls") == 0) {
             DIR *d;
             struct dirent *dir;
-            d = opendir(".");
+            d = opendir(server_current_dir);
             if (d) {
                 response[0] = '\0';
                 while ((dir = readdir(d)) != NULL) {
@@ -210,16 +301,14 @@ void *handle_client(void *client_socket) {
                 snprintf(response, BUFFER_SIZE, "550 Failed to list directory\n");
             }
         } else if (strcmp(cmd, "pwd") == 0) {
-            if (getcwd(response, BUFFER_SIZE) != NULL) {
-                strcat(response, "\n");
-            } else {
-                snprintf(response, BUFFER_SIZE, "550 Failed to get current directory\n");
-            }
+            snprintf(response, BUFFER_SIZE, "%s\n", server_current_dir);
         } else if (strcmp(cmd, "get") == 0) {
             if (arg == NULL) {
                 snprintf(response, BUFFER_SIZE, "550 No file specified\n");
             } else {
-                FILE *file = fopen(arg, "rb");
+                char file_path[BUFFER_SIZE];
+                snprintf(file_path, BUFFER_SIZE, "%s/%s", server_current_dir, arg);
+                FILE *file = fopen(file_path, "rb");
                 if (file == NULL) {
                     snprintf(response, BUFFER_SIZE, "550 File not found\n");
                 } else {
@@ -239,7 +328,9 @@ void *handle_client(void *client_socket) {
             if (arg == NULL) {
                 snprintf(response, BUFFER_SIZE, "550 No file specified\n");
             } else {
-                FILE *file = fopen(arg, "wb");
+                char file_path[BUFFER_SIZE];
+                snprintf(file_path, BUFFER_SIZE, "%s/%s", server_current_dir, arg);
+                FILE *file = fopen(file_path, "wb");
                 if (file == NULL) {
                     snprintf(response, BUFFER_SIZE, "550 Failed to create file\n");
                 } else {
